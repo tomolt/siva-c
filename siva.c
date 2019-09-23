@@ -2,119 +2,130 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <setjmp.h>
 
-#define SIVA_ALRIGHT 0
-#define SIVA_ARCHIVE_CORRUPTED -1
-#define SIVA_FILE_INACCESSIBLE -2
-#define SIVA_OUT_OF_MEMORY -3
+struct siva_io {
+	void * opaque;
+	int64_t (*read)(struct siva_io *, void *, uint64_t);
+	int64_t (*write)(struct siva_io *, void const *, uint64_t);
+	int64_t (*seek)(struct siva_io *, uint64_t);
+	int64_t (*tell)(struct siva_io *);
+	int64_t (*length)(struct siva_io *);
+	int (*flush)(struct siva_io *);
+};
 
-#define EOK SIVA_ALRIGHT
-#define EAC SIVA_ARCHIVE_CORRUPTED
-#define EFI SIVA_FILE_INACCESSIBLE
-#define EOM SIVA_OUT_OF_MEMORY
+struct siva;
 
-struct Entry {
-	uint64_t blockOffset;
+struct siva * siva_openarchive(struct siva_io);
+siva_open(struct siva *, char const *);
+int64_t siva_read();
+int64_t siva_write();
+int64_t siva_seek();
+int64_t siva_tell();
+int64_t siva_length();
+int siva_flush();
+
+struct siva_entry {
+	uint64_t fileOffset;
 	uint64_t size;
 	int64_t modTime;
-	const char * name;
+	char const * name;
 	uint32_t goMode;
 	uint32_t lenName;
 	unsigned int flags;
 };
 
-struct Block {
-	uint64_t fileOffset;
-	struct Entry * entries;
+struct siva {
+	struct siva_io io;
+	struct siva_entry * entries;
 	uint32_t numEntries;
+	unsigned int ordered;
 };
 
-struct SivaFile {
-	struct Block * blocks;
-	unsigned int numBlocks;
+struct siva_footer {
+	uint64_t indexSize;
+	uint64_t blockSize;
+	uint32_t numEntries;
+	uint32_t crc32;
 };
 
-static inline void enforce(int cond, int nature, jmp_buf * err)
-{
-	if (!cond) {
-		longjmp(*err, nature);
-	}
-}
-
-static uint32_t getu32(FILE * file, jmp_buf * err)
+static inline uint32_t siva_getu32(uint8_t * restrict raw)
 {
 	uint32_t accum = 0;
-	for (int i = 0; i < 4; ++i) {
-		int byte = fgetc(file);
-		enforce(byte != EOF, EFI, err);
-		accum = accum << 8 | byte;
-	}
+	for (int i = 4; i > 0; --i)
+		accum = (accum << 8) | *(raw++);
 	return accum;
 }
 
-static uint64_t getu64(FILE * file, jmp_buf * err)
+static inline uint64_t siva_getu64(uint8_t * restrict raw)
 {
 	uint64_t accum = 0;
-	for (int i = 0; i < 8; ++i) {
-		int byte = fgetc(file);
-		enforce(byte != EOF, EFI, err);
-		accum = accum << 8 | byte;
-	}
+	for (int i = 8; i > 0; --i)
+		accum = (accum << 8) | *(raw++);
 	return accum;
 }
 
-static uint64_t getFileSize(FILE * file, jmp_buf * err)
+static int siva_readfooter(struct siva * siva, struct siva_footer * footer)
 {
-	struct stat stats;
-	int fd = fileno(file);
-	enforce(fstat(fd, &stats) == 0, EFI, err);
-	enforce(S_ISREG(stats.st_mode), EFI, err);
-	return stats.st_size;
+	uint8_t buffer[24];
+	if (siva->io.seek(siva->io, end - 24) != )
+		goto abort;
+	if (siva->io.read(siva->io, buffer, 24) != 24)
+		goto abort;
+	footer->numEntries = siva_getu32(buffer + 0);
+	uint64_t indexSize = siva_getu64(buffer + 4);
+	uint64_t blockSize = siva_getu64(buffer + 12);
+	footer->crc32 = siva_getu32(buffer + 20);
+	if (indexSize < 24 || indexSize > blockSize)
+		goto abort;
+	if (blockSize < 24 || blockSize > end)
+		goto abort;
+	footer->indexOffset = end - indexSize;
+	footer->blockOffset = end - blockSize;
+	return 1;
+abort:
+	return 0;
 }
 
-int sivaReadFile(FILE * file)
+static int siva_readentries(struct siva * siva)
 {
-	jmp_buf jmp, * err = &jmp;
-	int ret = setjmp(jmp);
-	if (ret == 0) {
-		uint64_t leftSize = getFileSize(file, err);
-		do {
-			/* footer */
-			enforce(leftSize >= 24, EAC, err);
-			uint64_t indexSize, blockSize;
-			fseeko(file, leftSize - 24, SEEK_SET);
-			uint32_t numEntries = getu32(file, err);
-			struct Block * block = allocBlock(numEntries);
-			uint64_t indexSize = getu64(file, err);
-			uint64_t blockSize = getu64(file, err);
-			uint32_t crc32 = getu32(file, err);
-			(void) crc32; // TODO integrity check
-			enforce(indexSize >= 24 && indexSize <= blockSize, EAC, err);
-			enforce(blockSize >= 24 && blockSize <= leftSize, EAC, err);
-			/* index */
-			fseeko(file, leftSize - indexSize, SEEK_SET);
-			char magic[4];
-			enforce(fread(magic, 4, 1, file) == 1, EFI, err);
-			enforce(memcmp(magic, "IBA1", 4) == 0, EAC, err);
-			for (unsigned int e = 0; e < numEntries; ++e) {
-				struct Entry * entry = block->entries + e;
-				entry->lenName = getu32(file, err);
-				entry->name = calloc(entry->lenName + 1, 1);
-				enforce(fread(entry->name, entry->lenName, 1, file) == 1, EFI, err);
-				entry->goMode = getu32(file, err);
-				entry->modTime = getu64(file, err);
-				entry->blockOffset = getu64(file, err);
-				entry->size = getu64(file, err);
-				entry->crc32 = getu32(file, err);
-				entry->flags = getu32(file, err);
-			}
-			leftSize -= blockSize;
-		} while (leftSize != 0);
-		return EOK;
-	} else {
-		sivaFree(siva);
-		return ret;
+	uint64_t entriesSize = indexSize - 24;
+	char * buffer = calloc(1, entriesSize);
+	if (io->seek(io, entriesOffset) != )
+		goto abort;
+	if (io->read(io, buffer, entriesSize) != entriesSize)
+		goto abort;
+	if (memcmp(buffer, "IBA1", 4) != 0)
+		goto abort;
+	if (siva_crc32(buffer, entriesSize) != crc32)
+		goto abort;
+	for (int i = 0; i < numEntries; ++i) {
+		struct siva_entry * entry = ;
+		entry->lenName = siva_getu32(cursor);
 	}
+	free(buffer);
+	return 1;
+abort:
+	free(buffer);
+	return 0;
+}
+
+struct siva * siva_openarchive(struct siva_io io)
+{
+	struct siva * siva = calloc(1, sizeof(struct siva));
+	siva->io = io;
+	int64_t end = siva->io.length(siva->io);
+	do {
+		if (end < 24)
+			goto abort;
+		if (!siva_readfooter(siva))
+			goto abort;
+		if (!siva_readentries(siva))
+			goto abort;
+		end = ;
+	} while (end > 0);
+	return siva;
+abort:
+	free(siva);
+	return NULL;
 }
 
