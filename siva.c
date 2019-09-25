@@ -184,7 +184,7 @@ static int siva_readentries(
 		goto abort;
 	if (io.read(io, buffer, entriesSize) != (int64_t) entriesSize)
 		goto abort;
-	if (memcmp(buffer, "IBA1", 4) != 0)
+	if (memcmp(buffer, "IBA\01", 4) != 0)
 		goto abort;
 	if (siva_crc32(buffer, entriesSize) != crc32)
 		goto abort;
@@ -229,8 +229,8 @@ static int siva_readindex(
 		goto abort;
 	if (blockSize < 24 || blockSize > *end)
 		goto abort;
-	if (!siva_readentries(io, *end - indexSize,
-		indexSize - 24, numEntries, *end - blockSize, crc32, siva))
+	if (!siva_readentries(io, *end - 24 - indexSize,
+		indexSize, numEntries, *end - 24 - blockSize, crc32, siva))
 		goto abort;
 	*end -= blockSize;
 
