@@ -230,7 +230,7 @@ static int siva_readindex(
 	if (blockSize < 24 || blockSize > *end)
 		goto abort;
 	if (!siva_readentries(io, *end - 24 - indexSize,
-		indexSize, numEntries, *end - 24 - blockSize, crc32, siva))
+		indexSize, numEntries, *end - blockSize, crc32, siva))
 		goto abort;
 	*end -= blockSize;
 
