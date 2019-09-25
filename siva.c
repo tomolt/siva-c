@@ -1,16 +1,12 @@
-#include "siva.h"
-
 #include <stdlib.h>
-#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
 
 struct siva_io {
 	void * opaque;
-	int64_t (*read)(struct siva_io, void *, uint64_t);
-	int64_t (*write)(struct siva_io, void const *, uint64_t);
-	int64_t (*seek)(struct siva_io, uint64_t);
-	int64_t (*tell)(struct siva_io);
 	int64_t (*length)(struct siva_io);
-	int (*flush)(struct siva_io);
+	int (*seek)(struct siva_io, uint64_t);
+	int64_t (*read)(struct siva_io, void *, uint64_t);
 };
 
 struct siva;
@@ -36,6 +32,7 @@ struct siva_entry {
 	int64_t modTime;
 	uint32_t lenName;
 	uint32_t goMode;
+	uint32_t crc32;
 	uint8_t flags;
 	char name[];
 };
@@ -123,9 +120,9 @@ static inline uint32_t siva_crc32(uint8_t const * restrict message, uint64_t cou
 	return remainder ^ 0xFFFFFFFF;
 }
 
-static inline uint32_t siva_getu32(uint8_t const ** cursor)
+static inline uint32_t siva_getu32(uint8_t ** cursor)
 {
-	uint8_t const * restrict ptr = *cursor;
+	uint8_t * restrict ptr = *cursor;
 	uint32_t accum = 0;
 	for (int i = 4; i > 0; --i)
 		accum = (accum << 8) | *(ptr++);
@@ -133,12 +130,12 @@ static inline uint32_t siva_getu32(uint8_t const ** cursor)
 	return accum;
 }
 
-static inline uint64_t siva_getu64(uint8_t const ** cursor)
+static inline uint64_t siva_getu64(uint8_t ** cursor)
 {
-	uint8_t const * restrict ptr = *cursor;
+	uint8_t * restrict ptr = *cursor;
 	uint64_t accum = 0;
 	for (int i = 8; i > 0; --i)
-		accum = (accum << 8) | *(raw++);
+		accum = (accum << 8) | *(ptr++);
 	*cursor = ptr;
 	return accum;
 }
@@ -176,6 +173,7 @@ static int siva_readentries(
 	uint64_t entriesOffset,
 	uint64_t entriesSize,
 	uint32_t numEntries,
+	uint64_t baseOffset,
 	uint32_t crc32,
 	struct siva ** siva)
 {
@@ -184,7 +182,7 @@ static int siva_readentries(
 		return 0;
 	if (!io.seek(io, entriesOffset))
 		goto abort;
-	if (io.read(io, buffer, entriesSize) != entriesSize)
+	if (io.read(io, buffer, entriesSize) != (int64_t) entriesSize)
 		goto abort;
 	if (memcmp(buffer, "IBA1", 4) != 0)
 		goto abort;
@@ -229,10 +227,10 @@ static int siva_readindex(
 	uint32_t crc32 = siva_getu32(cursor);
 	if (indexSize < 24 || indexSize > blockSize)
 		goto abort;
-	if (blockSize < 24 || blockSize > end)
+	if (blockSize < 24 || blockSize > *end)
 		goto abort;
 	if (!siva_readentries(io, *end - indexSize,
-		indexSize - 24, numEntries, crc32, siva))
+		indexSize - 24, numEntries, *end - blockSize, crc32, siva))
 		goto abort;
 	*end -= blockSize;
 
@@ -247,7 +245,10 @@ struct siva * siva_openarchive(struct siva_io io)
 	if (siva == NULL)
 		return NULL;
 	siva->io = io;
-	int64_t end = io.length(io);
+	int64_t length = io.length(io);
+	if (length < 0)
+		return NULL;
+	uint64_t end = length;
 	do {
 		if (!siva_readindex(io, &end, &siva))
 			goto abort;
@@ -257,5 +258,49 @@ struct siva * siva_openarchive(struct siva_io io)
 abort:
 	free(siva);
 	return NULL;
+}
+
+#include <stdio.h>
+#include <sys/stat.h>
+
+int64_t file_length(struct siva_io io)
+{
+	FILE * file = (FILE *) io.opaque;
+	struct stat stats;
+	int fd = fileno(file);
+	if (fstat(fd, &stats) != 0)
+		return -1;
+	if (!S_ISREG(stats.st_mode))
+		return -1;
+	return stats.st_size;
+}
+
+int file_seek(struct siva_io io, uint64_t offset)
+{
+	FILE * file = (FILE *) io.opaque;
+	return fseek(file, offset, SEEK_SET) == 0;
+}
+
+int64_t file_read(struct siva_io io, void * buffer, uint64_t size)
+{
+	FILE * file = (FILE *) io.opaque;
+	return fread(buffer, 1, size, file);
+}
+
+int main()
+{
+	FILE * file = fopen("test.siva", "rb");
+	if (file == NULL) {
+		perror("fopen()");
+		return -1;
+	}
+	struct siva_io io = { file, file_length, file_seek, file_read };
+	struct siva * siva = siva_openarchive(io);
+	if (siva == NULL) {
+		fprintf(stderr, "siva_openarchive()\n");
+		return -1;
+	}
+	fclose(file);
+	return 0;
 }
 
