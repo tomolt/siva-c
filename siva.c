@@ -4,9 +4,8 @@
 
 struct siva_io {
 	void * opaque;
-	int64_t (*length)(struct siva_io);
-	int     (*seek)  (struct siva_io, uint64_t);
-	int64_t (*read)  (struct siva_io, void *, uint64_t);
+	uint64_t length;
+	int64_t (*read)(void *, void *, uint64_t, uint64_t);
 };
 
 struct siva_archive;
@@ -185,9 +184,7 @@ static int siva_readentries(
 	uint8_t * buffer = calloc(1, entriesSize);
 	if (buffer == NULL)
 		return 0;
-	if (!io.seek(io, entriesOffset))
-		goto abort;
-	if (io.read(io, buffer, entriesSize) != (int64_t) entriesSize)
+	if (io.read(io.opaque, buffer, entriesSize, entriesOffset) != (int64_t) entriesSize)
 		goto abort;
 	/* verify integrity of buffer contents */
 	if (memcmp(buffer, "IBA\01", 4) != 0)
@@ -222,14 +219,12 @@ static int siva_readindex(
 	uint64_t * end,
 	struct siva_archive ** siva)
 {
-	int const FOOTER_SIZE = 24;
+	unsigned int const FOOTER_SIZE = 24;
 	/* copy relevant memory into a buffer */
 	uint8_t buffer[FOOTER_SIZE];
 	if (*end < FOOTER_SIZE)
 		goto abort;
-	if (!io.seek(io, *end - FOOTER_SIZE))
-		goto abort;
-	if (io.read(io, buffer, FOOTER_SIZE) != FOOTER_SIZE)
+	if (io.read(io.opaque, buffer, FOOTER_SIZE, *end - FOOTER_SIZE) != FOOTER_SIZE)
 		goto abort;
 	/* read and store all the primitive data fields */
 	uint8_t * ptr = buffer, ** cursor = &ptr;
@@ -263,10 +258,7 @@ struct siva_archive * siva_openarchive(struct siva_io io)
 		return NULL;
 	siva->io = io;
 	/* iterate through all blocks and concatenate contents, most recent coming first */
-	int64_t length = io.length(io);
-	if (length < 0)
-		return NULL;
-	uint64_t end = length;
+	uint64_t end = io.length;
 	do {
 		if (!siva_readindex(io, &end, &siva))
 			goto abort;
@@ -279,14 +271,13 @@ abort:
 	return NULL;
 }
 
-#include <stdio.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
-int64_t file_length(struct siva_io io)
+int64_t unixfs_length(int fd)
 {
-	FILE * file = (FILE *) io.opaque;
 	struct stat stats;
-	int fd = fileno(file);
 	if (fstat(fd, &stats) != 0)
 		return -1;
 	if (!S_ISREG(stats.st_mode))
@@ -294,32 +285,33 @@ int64_t file_length(struct siva_io io)
 	return stats.st_size;
 }
 
-int file_seek(struct siva_io io, uint64_t offset)
+int64_t unixfs_read(void * opaque, void * buffer, uint64_t size, uint64_t offset)
 {
-	FILE * file = (FILE *) io.opaque;
-	return fseek(file, offset, SEEK_SET) == 0;
+	int fd = (intptr_t) opaque;
+	return pread(fd, buffer, size, offset);
 }
 
-int64_t file_read(struct siva_io io, void * buffer, uint64_t size)
-{
-	FILE * file = (FILE *) io.opaque;
-	return fread(buffer, 1, size, file);
-}
+#include <stdio.h>
 
 int main()
 {
-	FILE * file = fopen("test.siva", "rb");
-	if (file == NULL) {
-		perror("fopen()");
+	int fd = open("test.siva", O_RDONLY);
+	if (fd < 0) {
+		perror("open()");
 		return -1;
 	}
-	struct siva_io io = { file, file_length, file_seek, file_read };
+	int64_t length = unixfs_length(fd);
+	if (length < 0) {
+		fprintf(stderr, "unixfs_length()\n");
+		return -1;
+	}
+	struct siva_io io = { (void *) (intptr_t) fd, length, unixfs_read };
 	struct siva_archive * siva = siva_openarchive(io);
 	if (siva == NULL) {
 		fprintf(stderr, "siva_openarchive()\n");
 		return -1;
 	}
-	fclose(file);
+	close(fd);
 	return 0;
 }
 
