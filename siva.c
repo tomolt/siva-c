@@ -31,7 +31,7 @@ static int siva_readentry(
 {
 	/* allocate entry with enough space for its name */
 	uint32_t lenName = siva_getu32(cursor);
-	struct siva_entry * entry = calloc(1, sizeof(struct siva_entry) + lenName + 1);
+	struct siva_entry * entry = calloc(1, sizeof(struct siva_entry));
 	if (entry == NULL)
 		return 0;
 	/* read and store all the primitive data fields */

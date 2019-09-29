@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "siva.h"
 #include "siva_internal.h"
 
 static int const siva_table_load_factor = 80;
@@ -86,7 +87,7 @@ static void siva_table_insert(struct siva_table * table,
 void siva_table_set(struct siva_table * table,
 	struct siva_key key, struct siva_entry entry)
 {
-	if (100 * (table->count + 1) / table->size > siva_table_load_factor) {
+	if ((int) (100 * (table->count + 1) / table->size) > siva_table_load_factor) {
 		struct siva_table repl;
 		siva_table_new(table->size * 2, &repl);
 		for (uint64_t idx = 0; idx < table->size; ++idx) {

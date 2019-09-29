@@ -1,8 +1,4 @@
 
-struct siva_entry {
-	int value;
-};
-
 struct siva_key {
 	char const * name;
 	uint32_t length;

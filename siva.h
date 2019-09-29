@@ -17,7 +17,7 @@ struct siva_entry {
 	uint32_t goMode;
 	uint32_t crc32;
 	uint8_t flags;
-	char name[];
+	char name[50];
 };
 
 struct siva_archive {

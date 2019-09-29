@@ -6,7 +6,8 @@
 #define SD_OPTION_PEDANTIC 1
 #define SD_IMPLEMENT_HERE 1
 #include "sd_cuts.h"
-#include "table.h"
+#include "siva.h"
+#include "siva_internal.h"
 
 #define NUM_ITERATIONS 50000
 
@@ -23,7 +24,8 @@ static void test_table_insertion(struct siva_table * table,
 		char * name = calloc(1, length);
 		strcpy(name, buf);
 		struct siva_key key = { name, length, siva_table_hash_func(name, length) };
-		struct siva_entry entry = { rd };
+		struct siva_entry entry;
+		entry.size = rd;
 		siva_table_set(table, key, entry);
 		keys[i] = key;
 		entries[i] = entry;
@@ -41,7 +43,7 @@ static void test_table_lookup(struct siva_table * table,
 		struct siva_entry * entry = siva_table_get(table, keys[i]);
 		sd_assert(entry != NULL);
 		if (entry != NULL) {
-			sd_assertiq(entry->value, entries[i].value);
+			sd_assertiq(entry->size, entries[i].size);
 		}
 		sd_pop();
 	}
