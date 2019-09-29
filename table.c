@@ -2,26 +2,11 @@
 #include <stdint.h>
 #include <string.h>
 
-struct siva_entry {
-	uint64_t size;
-};
-
-struct siva_key {
-	char const * name;
-	uint32_t length;
-	uint32_t hash;
-};
-
-struct siva_table {
-	uint64_t size;
-	uint64_t count;
-	struct siva_key * keys;
-	struct siva_entry * entries;
-};
+#include "table.h"
 
 static int const siva_table_load_factor = 80;
 
-static uint32_t siva_table_hash_func(char const * name, uint32_t length)
+uint32_t siva_table_hash_func(char const * name, uint32_t length)
 {
 	uint32_t hash = 33;
 	for (uint32_t i = 0; i < length; ++i) {
@@ -69,7 +54,7 @@ static int siva_table_probe(struct siva_table * table, struct siva_key key, uint
 		if (prDistance < 0) {
 			prDistance += table->size;
 		}
-		if (distance >= (uint64_t) prDistance) {
+		if (distance > (uint64_t) prDistance) {
 			*ret = idx;
 			return 0;
 		}
