@@ -8,7 +8,7 @@
 #include "sd_cuts.h"
 #include "table.h"
 
-#define NUM_ITERATIONS 5000
+#define NUM_ITERATIONS 50000
 
 static void test_table_insertion(struct siva_table * table,
 	struct siva_key * keys, struct siva_entry * entries)
