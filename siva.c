@@ -26,69 +26,65 @@ static inline uint64_t siva_getu64(uint8_t ** cursor)
 
 static int siva_readentry(
 	uint8_t ** cursor,
-	uint64_t baseOffset,
-	struct siva_entry ** outEntry)
+	uint64_t blockOffset,
+	struct siva_table * table)
 {
-	/* allocate entry with enough space for its name */
-	uint32_t lenName = siva_getu32(cursor);
-	struct siva_entry * entry = calloc(1, sizeof(struct siva_entry));
-	if (entry == NULL)
-		return 0;
+	struct siva_key key;
+	struct siva_entry entry;
 	/* read and store all the primitive data fields */
-	entry->lenName = lenName;
-	memcpy(entry->name, *cursor, lenName);
-	*cursor += lenName;
-	entry->goMode = siva_getu32(cursor);
-	entry->modTime = (int64_t) siva_getu64(cursor);
-	entry->fileOffset = baseOffset + siva_getu64(cursor);
-	entry->size = siva_getu64(cursor);
-	entry->crc32 = siva_getu32(cursor);
-	entry->flags = siva_getu32(cursor);
+	key.length = siva_getu32(cursor);
+	key.name = calloc(1, key.length + 1);
+	memcpy(key.name, *cursor, key.length);
+	*cursor += key.length;
+	key.hash = siva_table_hash_func(key.name, key.length);
+	entry.goMode = siva_getu32(cursor);
+	entry.modTime = (int64_t) siva_getu64(cursor);
+	entry.fileOffset = blockOffset + siva_getu64(cursor);
+	entry.size = siva_getu64(cursor);
+	entry.crc32 = siva_getu32(cursor);
+	entry.flags = siva_getu32(cursor);
 	/* perform some simple sanity checks */
-	if (entry->flags != 0x0 && entry->flags != 0x1)
+	if (entry.flags != 0x0 && entry.flags != 0x1)
 		goto abort;
 	/* success */
-	*outEntry = entry;
+	siva_table_set(table, key, entry);
 	return 1;
 	/* failure */
 abort:
-	free(entry);
 	return 0;
 }
 
-static int siva_readentries(
+struct siva_footer
+{
+	uint64_t indexOffset;
+	uint64_t blockOffset;
+	uint64_t indexSize;
+	uint32_t numEntries;
+	uint32_t crc32;
+};
+
+static int siva_readindex(
 	struct siva_io io,
-	uint64_t entriesOffset,
-	uint64_t entriesSize,
-	uint32_t numEntries,
-	uint64_t baseOffset,
-	uint32_t crc32,
-	struct siva_archive ** siva)
+	struct siva_footer footer,
+	struct siva_table * table)
 {
 	/* copy relevant memory into a buffer */
-	uint8_t * buffer = calloc(1, entriesSize);
+	uint8_t * buffer = calloc(1, footer.indexSize);
 	if (buffer == NULL)
 		return 0;
-	if (io.read(io.opaque, buffer, entriesSize, entriesOffset) != (int64_t) entriesSize)
+	if (io.read(io.opaque, buffer, footer.indexSize,
+		footer.indexOffset) != (int64_t) footer.indexSize)
 		goto abort;
 	/* verify integrity of buffer contents */
 	if (memcmp(buffer, "IBA\01", 4) != 0)
 		goto abort;
-	if (siva_crc32(buffer, entriesSize) != crc32)
-		goto abort;
-	/* make space for new entries */
-	uint32_t baseIndex = (*siva)->numEntries;
-	(*siva)->numEntries += numEntries;
-	*siva = realloc(*siva, sizeof(struct siva_archive) + (*siva)->numEntries * sizeof(struct siva_entry));
-	if (*siva == NULL)
+	if (siva_crc32(buffer, footer.indexSize) != footer.crc32)
 		goto abort;
 	/* read & append entries one by one */
 	uint8_t * ptr = buffer + 4, ** cursor = &ptr;
-	for (uint32_t idx = 0; idx < numEntries; ++idx) {
-		struct siva_entry * entry;
-		if (!siva_readentry(cursor, baseOffset, &entry))
+	for (uint32_t idx = 0; idx < footer.numEntries; ++idx) {
+		if (!siva_readentry(cursor, footer.blockOffset, table))
 			goto abort;
-		(*siva)->entries[baseIndex + idx] = entry;
 	}
 	/* success */
 	free(buffer);
@@ -99,10 +95,10 @@ abort:
 	return 0;
 }
 
-static int siva_readindex(
+static int siva_readfooter(
 	struct siva_io io,
 	uint64_t * end,
-	struct siva_archive ** siva)
+	struct siva_footer * footer)
 {
 	unsigned int const FOOTER_SIZE = 24;
 	/* copy relevant memory into a buffer */
@@ -113,18 +109,16 @@ static int siva_readindex(
 		goto abort;
 	/* read and store all the primitive data fields */
 	uint8_t * ptr = buffer, ** cursor = &ptr;
-	uint32_t numEntries = siva_getu32(cursor);
-	uint64_t indexSize = siva_getu64(cursor);
+	footer->numEntries = siva_getu32(cursor);
+	footer->indexSize = siva_getu64(cursor);
 	uint64_t blockSize = siva_getu64(cursor);
-	uint32_t crc32 = siva_getu32(cursor);
+	footer->crc32 = siva_getu32(cursor);
+	footer->indexOffset = *end - FOOTER_SIZE - footer->indexSize;
+	footer->blockOffset = *end - blockSize;
 	/* perform some simple sanity checks */
-	if (indexSize < FOOTER_SIZE || indexSize > blockSize)
+	if (footer->indexSize < FOOTER_SIZE || footer->indexSize > blockSize)
 		goto abort;
 	if (blockSize < FOOTER_SIZE || blockSize > *end)
-		goto abort;
-	/* read the list of entries */
-	if (!siva_readentries(io, *end - FOOTER_SIZE - indexSize,
-		indexSize, numEntries, *end - blockSize, crc32, siva))
 		goto abort;
 	/* move to the end of the preceding block */
 	*end -= blockSize;
@@ -142,17 +136,30 @@ struct siva_archive * siva_openarchive(struct siva_io io)
 	if (siva == NULL)
 		return NULL;
 	siva->io = io;
+	siva_table_new(16, &siva->table);
 	/* iterate through all blocks and concatenate contents, most recent coming first */
+	struct siva_footer footers[100]; /* TODO dynamic (re-) allocation */
+	uint64_t count = 0;
 	uint64_t end = io.length;
 	do {
-		if (!siva_readindex(io, &end, &siva))
+		if (!siva_readfooter(io, &end, &footers[count++]))
 			goto abort;
 	} while (end > 0);
+	for (int64_t idx = count - 1; idx >= 0; --idx) {
+		if (!siva_readindex(io, footers[idx], &siva->table))
+			goto abort;
+	}
 	/* success */
 	return siva;
 	/* failure */
 abort:
-	free(siva);
+	siva_freearchive(siva);
 	return NULL;
+}
+
+void siva_freearchive(struct siva_archive * archive)
+{
+	(void) archive;
+	/* TODO */
 }
 
