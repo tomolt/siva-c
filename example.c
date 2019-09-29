@@ -41,6 +41,13 @@ int main()
 		fprintf(stderr, "siva_openarchive()\n");
 		return -1;
 	}
+	for (uint64_t idx = 0; idx < siva->table.size; ++idx) {
+		struct siva_key key = siva->table.keys[idx];
+		struct siva_entry entry = siva->table.entries[idx];
+		if (key.name == NULL) continue;
+		if (entry.flags & 0x01) continue;
+		printf("%s\n", key.name);
+	}
 	close(fd);
 	return 0;
 }
